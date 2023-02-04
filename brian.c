@@ -14,13 +14,15 @@
 #define DEBUG
 #define MAX_TOKENS 1024
 #define MAX_IDENTIFIER_LENGTH 30
+#define TEMP_BUFFER_SIZE 1000
 
 /***********************************************
  * Structs and Globals
 ************************************************/
 
 typedef enum {
-  BINARYOP, VARIABLE, CONSTANT, IMPLY, PAREN, BRACKET, CURLY, END
+  BINARYOP, VARIABLE, CONSTANT, IMPLY, QUOTED,
+  PAREN, BRACKET, CURLY, END
 } termtype;
 
 typedef struct TOKENNODE
@@ -43,6 +45,18 @@ typedef struct STATEMENTNODE{
   astnode *statement;
   struct STATEMENTNODE *next;
 } statementnode;
+
+typedef struct UNIFIER{
+  astnode *var;
+  astnode *term;
+  struct UNIFIER *next;
+} unifier;
+
+typedef struct MATCHEDNODE{
+  astnode *node;
+  unifier *unifiers;
+  struct MATCHEDNODE *next;
+} matchednode;
 
 char *memfile=NULL;
 tokennode *tokens[MAX_TOKENS];
@@ -118,6 +132,43 @@ void freeStatement(statementnode *stmnt){
   }
 }
 
+unifier *createUnifier(astnode *term, astnode *var){
+  unifier *u=malloc(sizeof(unifier));
+  u->var=var,
+  u->term=term;
+  u->next=NULL;
+  return u;
+}
+
+void freeUnifier(unifier *u){
+  if(!u) return;
+  unifier *u1=u->next;
+  free(u);
+  while(u1){
+    u=u1;
+    u1=u->next;
+    free(u);
+  }
+}
+
+matchednode *createMatchedNode(astnode *node, unifier *u){
+  matchednode *m=malloc(sizeof(matchednode));
+  m->node=node;
+  m->unifiers=u;
+  return m;
+}
+
+void freeMatchedNode(matchednode *m){
+  if(!m) return;
+  matchednode *m1=m->next;
+  freeUnifier(m->unifiers);
+  free(m);
+  while(m1){
+    m=m1;
+    m1=m->next;
+    free(m);
+  }
+}
 /*************************************************
  * Stack and List Operations
 **************************************************/
@@ -190,6 +241,120 @@ void appendRule(statementnode *rule){
 /**********************************************
  * Abstract Syntax Tree
 ***********************************************/
+
+astnode *copydeepASTNode(astnode *node){
+  astnode *copy = createAST(node->identifier, node->type, node->serial);
+  if(node->left) copy->left=copydeepASTNode(node->left);
+  if(node->right) copy->left=copydeepASTNode(node->right);
+  return copy;  
+}
+
+void replaceVariable(astnode *term, unifier *u){
+  if(term->left){
+    if(!strcmp(term->left->identifier, u->var->identifier)){
+      term->left=copydeepASTNode(u->term);
+    }
+  }
+  if(term->right){
+    if(!strcmp(term->right->identifier, u->var->identifier)){
+      term->right=copydeepASTNode(u->term);
+    }
+  }
+}
+
+bool equivalent(astnode *term, astnode *rulehead){
+  bool left=true;
+  bool right=true;
+  if(rulehead->type==VARIABLE) return true;
+  if(term->type!=rulehead->type) return false;
+  if(strcmp(term->identifier,rulehead->identifier)) return false;
+  if(term->left!=NULL){
+    if(rulehead->left==NULL) return false;
+    left=equivalent(term->left, rulehead->left);
+  }
+  else if(rulehead->left!=NULL){
+    return false;
+  }
+  if(term->right!=NULL){
+    if(rulehead->right==NULL) return false;
+    right=equivalent(term->right, rulehead->right);
+  }
+  else if(rulehead->right!=NULL){
+    return false;
+  }
+  return left && right;
+}
+
+unifier *unify(astnode *term, astnode *rulenode){
+  if(rulenode->type==VARIABLE) return(createUnifier(term, rulenode));
+  if(strcmp(term->identifier, rulenode->identifier)) return NULL;
+  if(term->type!=rulenode->type) return NULL;
+  unifier *u=NULL;
+  if(term->left){
+    if(!rulenode->left) return NULL;
+    unifier *left=unify(term->left, rulenode->left);
+    if(left) u=left;
+  }
+  else if(rulenode->left){
+    return NULL;
+  }
+  if(term->right){
+    if(!rulenode->right) return NULL;
+    unifier *right=unify(term->right, rulenode->right);
+    if(right){
+      if(u){
+        unifier *u1=u;
+        while(u1->next){
+          u1=u1->next;
+        }
+        u1->next=right;
+      }
+      else{
+        u=right;
+      }
+    }
+  }
+  else if(rulenode->right){
+    return NULL;
+  }
+}
+
+matchednode *resolve(astnode *term, astnode *rulehead){
+  matchednode *m=NULL;
+  if(equivalent(term, rulehead)){
+    unifier *u=unify(term, rulehead);
+    if(u){
+      m=createMatchedNode(term, u);
+    }
+  }
+  if(term->left){
+    matchednode *l=resolve(term->left, rulehead);
+    if(l){
+      if(m){
+        m->next=l;
+      }
+      else{
+        m=l;
+      }
+    }
+  }
+  if(term->right){
+    matchednode *r=resolve(term->right, rulehead);
+    if(r){
+      if(m){
+        matchednode *m1=m;
+        while(m1->next){
+          m1=m1->next;
+        }
+        m1->next=r;
+      }
+      else{
+        m=r;
+      }
+    }
+  }
+  return m;
+}
 
 char *getFormula(astnode *ast, bool paren){
   char begin[2]="\0\0";
@@ -381,6 +546,7 @@ void postfixTokens(){
       break;
     case VARIABLE:
     case CONSTANT:
+    case QUOTED:
       appendPostfix(tnode);
       break;
     case BINARYOP:
@@ -434,6 +600,39 @@ void postfixTokens(){
     }
     t++;
   }
+// replace quoted strings with comma-delimited lists of characters
+// comma is the only right-associative binary operator to force 
+// head/tail functionality to behave as expected
+  tokennode *temp[MAX_TOKENS];
+  int tempi=0;
+  int pfi=0;
+  while(pfi<postfixindex){
+    tokennode *node=postfix[pfi++];
+    if(node->type==QUOTED){
+      tokennode *brack=createToken("[",BRACKET);
+      temp[tempi++]=brack;
+      for(int j=1;j<strlen(node->identifier)-1;j++){
+        char tc[2]="\0\0";
+        tc[0]=node->identifier[j];
+        tokennode *character=createToken(tc, CONSTANT);
+        temp[tempi++]=character;
+      }
+      for(int j=1;j<strlen(node->identifier)-2;j++){
+        tokennode *comma=createToken(",",BINARYOP);
+        temp[tempi++]=comma;
+      }
+      temp[tempi++]=createToken("]",BRACKET);
+    }
+    else {
+      temp[tempi++]=node;
+    }
+  }
+  for(int tempj=0;tempj<tempi;tempj++){
+    postfix[tempj]=temp[tempj];
+  }
+  postfixindex=tempi;
+
+
   astTokens();
 }
 
@@ -452,7 +651,8 @@ void tokenizeMemFile(long memfilelength){
       nc=memfile[i+1];
     }
     if(c==' ' || c=='\n' || c=='\t' || c=='(' || c==')' 
-     || c=='[' || c==']' || c=='{' || c=='}' || c==',' || c=='.'){
+     || c=='[' || c==']' || c=='{' || c=='}' || c==',' 
+     || c=='.' || c=='"' || c=='#'){
       if(inword){
         identifier[identindex]=0;
         tnode=createToken(identifier, wordtype);
@@ -498,6 +698,28 @@ void tokenizeMemFile(long memfilelength){
       tnode=createToken("->", IMPLY);
       appendToken(tnode);
       i++;
+    }
+    else if(c=='#'){
+      while(c!='\n' && i<memfilelength) c=memfile[++i];
+    }
+    else if(c=='"'){
+      char buffer[TEMP_BUFFER_SIZE];
+      int bi=0;
+      int quotecount=0;
+      while(quotecount<2){
+        buffer[bi++]=c;
+        if(c=='"') quotecount++;
+        if(i+1>=memfilelength){
+          buffer[bi++]='"';
+          buffer[bi]=0;
+        }
+        else {
+          c=memfile[++i];
+        }
+      }
+      i--;
+      tnode=createToken(buffer, QUOTED);
+      appendToken(tnode);
     }
     else if(c=='.'){
       char id[2];
@@ -591,6 +813,57 @@ char *loadMemFile(const char *pathname){
   tokenizeMemFile(sz);
 }
 
+void runProgram(){
+  statementnode *stmnt=program;
+  while(stmnt!=NULL){
+    astnode *prog=stmnt->statement;
+    if(prog){
+      // put Rules in the Rules list
+      if(!strcmp(prog->identifier,"->")){
+        statementnode *newstmnt=createStatement(prog);
+        appendRule(newstmnt);
+      }
+    }
+    else{
+      // reduce program line
+      bool changed=true;
+      while(changed){
+        changed=false;
+        statementnode *rulelist=rules;
+        while(rulelist!=NULL){
+          astnode *rule=rulelist->statement;
+          if(rule){
+            astnode *rulehead=rule->left;
+            if(rulehead){
+              matchednode *mn=resolve(prog, rulehead);
+              if(mn){
+                matchednode *mnx=mn;
+                while(mnx){
+                  astnode *rulebody=copydeepASTNode(rule->right);
+                  unifier *u=mnx->unifiers;
+                  while(u){
+                    if(!strcmp(rulehead->identifier, u->var->identifier)){
+                      rulehead=copydeepASTNode(u->term);
+                    }
+                    else{
+                      replaceVariable(rulehead, u);
+                    }
+                    u=u->next;
+                  }
+                  mnx=mnx->next;
+                }
+              }
+            }
+          }
+          rulelist=rulelist->next;
+        }
+      }
+    }
+    stmnt=stmnt->next;
+  }
+
+}
+
 int main(int argc, char const *argv[]){
   printf("Brian\nCopyright (c) 2023 Brian O'Dell\n\n");
 #ifdef DEBUG
@@ -600,12 +873,13 @@ int main(int argc, char const *argv[]){
     printf("usage: brian programfile\n");
     return 1;
   }
-
 #endif
   statementnode *s=program;
   while(s!=NULL){
     char *f=getFormula(s->statement, false);
-    printf("%s\n", f);
+    printf("%s.\n", f);
     s=s->next;
   }
+  runProgram();
+
 }
