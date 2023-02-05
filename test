@@ -3,4 +3,3 @@ cons@(A,B)->[A,B].
 car@([A,B])->A.
 cdr@([A,B])->[B].
 car@(cdr@(cdr@(cdr@(cons@(x,[a,b,c,d]))))).
-cdr@([a,b,c,d]).
