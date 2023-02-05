@@ -245,7 +245,7 @@ void appendRule(statementnode *rule){
 astnode *copydeepASTNode(astnode *node){
   astnode *copy = createAST(node->identifier, node->type, node->serial);
   if(node->left) copy->left=copydeepASTNode(node->left);
-  if(node->right) copy->left=copydeepASTNode(node->right);
+  if(node->right) copy->right=copydeepASTNode(node->right);
   return copy;  
 }
 
@@ -254,12 +254,40 @@ void replaceVariable(astnode *term, unifier *u){
     if(!strcmp(term->left->identifier, u->var->identifier)){
       term->left=copydeepASTNode(u->term);
     }
+    else{
+      replaceVariable(term->left, u);
+    }
   }
   if(term->right){
     if(!strcmp(term->right->identifier, u->var->identifier)){
       term->right=copydeepASTNode(u->term);
     }
+    else{
+      replaceVariable(term->right, u);
+    }
   }
+}
+
+bool replaceNode(astnode *node, astnode *match, astnode *replace){
+  if(node->left){
+    if(node->left->serial==match->serial){
+      node->left=replace;
+      return true;
+    }
+    else{
+      if(replaceNode(node->left, match, replace)) return true;
+    }
+  }
+  if(node->right){
+    if(node->right->serial==match->serial){
+      node->right=replace;
+      return true;
+    }
+    else{
+      if(replaceNode(node->right, match, replace)) return true;
+    }
+  }
+  return false;
 }
 
 bool equivalent(astnode *term, astnode *rulehead){
@@ -357,6 +385,7 @@ matchednode *resolve(astnode *term, astnode *rulehead){
 }
 
 char *getFormula(astnode *ast, bool paren){
+  bool application=false;
   char begin[2]="\0\0";
   char end[2]="\0\0";
   char *left=NULL;
@@ -366,6 +395,7 @@ char *getFormula(astnode *ast, bool paren){
   {
   case BINARYOP:
   case IMPLY:
+    if(ast->identifier[0]=='@' && ast->identifier[1]==0) application=true;
     if(paren && ast->identifier[0]!=','){
       begin[0]='(';
     }
@@ -399,13 +429,16 @@ char *getFormula(astnode *ast, bool paren){
   if(begin[0]!=0) len+=1;
   if(left!=NULL) len+=strlen(left);
   len+=strlen(ast->identifier);
+  if(application) len+=2;
   if(right!=NULL) len+=strlen(right);
   if(end[0]!=0) len+=1;
   char *formula=(char *) calloc(1, len);
   if(begin[0]!=0) strcat(formula, begin);
   if(left!=NULL) strcat(formula, left);
   if(mid!=NULL) strcat(formula, mid);
+  if(application) strcat(formula, "(");
   if(right!=NULL) strcat(formula, right);
+  if(application) strcat(formula, ")");
   if(end[0]!=0) strcat(formula, end);
   return formula;
 }
@@ -823,40 +856,55 @@ void runProgram(){
         statementnode *newstmnt=createStatement(prog);
         appendRule(newstmnt);
       }
-    }
-    else{
-      // reduce program line
-      bool changed=true;
-      while(changed){
-        changed=false;
-        statementnode *rulelist=rules;
-        while(rulelist!=NULL){
-          astnode *rule=rulelist->statement;
-          if(rule){
-            astnode *rulehead=rule->left;
-            if(rulehead){
+      else{
+        // reduce program line
+        bool changed=true;
+        while(changed){
+          char *proga=getFormula(prog,false);
+          changed=false;
+          statementnode *rulelist=rules;
+          while(rulelist!=NULL){
+            astnode *rule=rulelist->statement;
+            if(rule){
+              astnode *rulehead=rule->left;             
+              astnode *rulebody=copydeepASTNode(rule->right);
               matchednode *mn=resolve(prog, rulehead);
               if(mn){
                 matchednode *mnx=mn;
                 while(mnx){
-                  astnode *rulebody=copydeepASTNode(rule->right);
                   unifier *u=mnx->unifiers;
                   while(u){
-                    if(!strcmp(rulehead->identifier, u->var->identifier)){
-                      rulehead=copydeepASTNode(u->term);
+                    if(!strcmp(rulebody->identifier, u->var->identifier)){
+                      rulebody=copydeepASTNode(u->term);
                     }
                     else{
-                      replaceVariable(rulehead, u);
+                      replaceVariable(rulebody, u);
                     }
                     u=u->next;
+                  }
+                  char *rbafter=getFormula(rulebody, false);
+#ifdef DEBUG
+                  printf("Statement - %s.\n", getFormula(prog, false));
+                  printf("  Rule - %s.\n", getFormula(rule, false));
+                  printf("    Matched Node - %s.\n", getFormula(mnx->node, false));
+                  printf("      Transformed Node - %s.\n", rbafter);
+#endif
+                  if(mnx->node->serial==prog->serial){
+                    prog=rulebody;
+                  }
+                  else{
+                    replaceNode(prog, mnx->node, rulebody);
                   }
                   mnx=mnx->next;
                 }
               }
             }
+            rulelist=rulelist->next;
           }
-          rulelist=rulelist->next;
+          char *progb=getFormula(prog, false);
+          if(strcmp(proga,progb)) changed=true;
         }
+        stmnt->statement=prog;
       }
     }
     stmnt=stmnt->next;
@@ -874,12 +922,20 @@ int main(int argc, char const *argv[]){
     return 1;
   }
 #endif
+  printf("Before...\n");
   statementnode *s=program;
   while(s!=NULL){
     char *f=getFormula(s->statement, false);
-    printf("%s.\n", f);
+    printf("  %s.\n", f);
     s=s->next;
   }
   runProgram();
+  printf("After...\n");
+  s=program;
+  while(s!=NULL){
+    char *f=getFormula(s->statement, false);
+    printf("  %s.\n", f);
+    s=s->next;
+  }
 
 }
