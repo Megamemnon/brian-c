@@ -21,8 +21,8 @@
 ************************************************/
 
 typedef enum {
-  BINARYOP, VARIABLE, CONSTANT, IMPLY, QUOTED,
-  PAREN, BRACKET, CURLY, END
+  BINARYOP, VARIABLE, CONSTANT, NUMBER, 
+  IMPLY, QUOTED, PAREN, BRACKET, CURLY, END
 } termtype;
 
 typedef struct TOKENNODE
@@ -345,6 +345,7 @@ unifier *unify(astnode *term, astnode *rulenode){
   else if(rulenode->right){
     return NULL;
   }
+  return NULL;
 }
 
 matchednode *resolve(astnode *term, astnode *rulehead){
@@ -408,6 +409,7 @@ char *getFormula(astnode *ast, bool paren){
     break;
   case VARIABLE:
   case CONSTANT:
+  case NUMBER:
     mid=ast->identifier;
     break;
   case BRACKET:
@@ -499,6 +501,7 @@ void astTokens(){
       break;
     case CONSTANT:
     case VARIABLE:
+    case NUMBER:
       ast=createAST(tnode->identifier, tnode->type, nodecounter++);
       appendOutput(ast);
       break;
@@ -579,6 +582,7 @@ void postfixTokens(){
       break;
     case VARIABLE:
     case CONSTANT:
+    case NUMBER:
     case QUOTED:
       appendPostfix(tnode);
       break;
@@ -673,6 +677,7 @@ void tokenizeMemFile(long memfilelength){
   int i=0;
   bool inword=false;
   bool inop=false;
+  bool innum=false;
   char identifier[MAX_IDENTIFIER_LENGTH+1];
   int identindex=0;
   termtype wordtype;
@@ -697,6 +702,12 @@ void tokenizeMemFile(long memfilelength){
         tnode=createToken(identifier, BINARYOP);
         appendToken(tnode);
         inop=false;
+      }
+      if(innum && !isdigit(nc)){
+        identifier[identindex]=0;
+        tnode=createToken(identifier, NUMBER);
+        appendToken(tnode);
+        innum=false;
       }
     }
     if(c=='(' || c==')'){
@@ -754,6 +765,68 @@ void tokenizeMemFile(long memfilelength){
       tnode=createToken(buffer, QUOTED);
       appendToken(tnode);
     }
+    else if(!innum && !inword && !inop && c=='-' && isdigit(nc)){
+      innum=true;
+      identindex=0;
+      identifier[identindex++]=c;
+      identifier[identindex++]=nc;
+      i++;
+    }
+    else if(innum && c=='.' && isdigit(nc)){
+      identifier[identindex++]=c;
+      identifier[identindex++]=nc;
+      i++;
+    }
+    else if(isdigit(c)){
+      if(innum){
+        identifier[identindex++]=c;
+      }
+      else{
+        if(inop){
+          identifier[identindex]=0;
+          tnode=createToken(identifier, BINARYOP);
+          appendToken(tnode);
+          inop=false;
+        }
+        if(inword){
+          identifier[identindex]=0;
+          tnode=createToken(identifier, wordtype);
+          appendToken(tnode);
+          inword=false;
+        }
+        innum=true;
+        identindex=0;
+        identifier[identindex++]=c;
+      }
+    }
+    else if(isalnum(c)){
+      if(inword){
+        identifier[identindex++]=c;
+      }
+      else{
+        if(inop){
+          identifier[identindex]=0;
+          tnode=createToken(identifier, BINARYOP);
+          appendToken(tnode);
+          inop=false;
+        }
+        if(innum){
+          identifier[identindex]=0;
+          tnode=createToken(identifier, NUMBER);
+          appendToken(tnode);
+          innum=false;
+        }
+        inword=true;
+        if(isupper(c)){
+          wordtype=VARIABLE;
+        }
+        else {
+          wordtype=CONSTANT;
+        }
+        identindex=0;
+        identifier[identindex++]=c;
+      }
+    }
     else if(c=='.'){
       char id[2];
       id[0]=c;
@@ -770,28 +843,6 @@ void tokenizeMemFile(long memfilelength){
       outputindex=0;
       connectivesindex=0;
     }
-    else if(isalnum(c)){
-      if(inword){
-        identifier[identindex++]=c;
-      }
-      else{
-        if(inop){
-          identifier[identindex]=0;
-          tnode=createToken(identifier, BINARYOP);
-          appendToken(tnode);
-          inop=false;
-        }
-        inword=true;
-        if(isupper(c)){
-          wordtype=VARIABLE;
-        }
-        else {
-          wordtype=CONSTANT;
-        }
-        identindex=0;
-        identifier[identindex++]=c;
-      }
-    }
     else if(c!=' ' && c!='\n' && c!='\t'){
       if(inop){
         identifier[identindex++]=c;
@@ -802,6 +853,12 @@ void tokenizeMemFile(long memfilelength){
           tnode=createToken(identifier, wordtype);
           appendToken(tnode);
           inword=false;
+        }
+        if(innum){
+          identifier[identindex]=0;
+          tnode=createToken(identifier, NUMBER);
+          appendToken(tnode);
+          innum=false;
         }
         inop=true;
         identindex=0;
